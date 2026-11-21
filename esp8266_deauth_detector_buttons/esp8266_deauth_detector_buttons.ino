@@ -3,6 +3,12 @@
    ESP8266 Deauth Detector (BUTTONS + SETTINGS)  -  by Gamkers
   ============================================================
   Passive WiFi attack monitor (receive only, never transmits).
+  Default look: the classic radar UI.
+  Settings > "Pet face" ON: a robot pet face scans instead of the radar,
+  reacts with its own face + animation for each attack, has mini eyes in
+  the alert headers, a sleeping screen saver and eyes in hunt mode.
+  Both looks show the attack details plus a second page (deauth analysis /
+  what to do + risk level).
   Every detection can be switched on/off from the on-screen settings menu,
   and the settings are saved (they survive power off).
 
@@ -59,12 +65,12 @@ Adafruit_SSD1306 oled(128, 64, &Wire, -1);
 #define ATTACKER_MS    3000     // time per attacker on the alert screen
 #define BOOT_MS        3200     // loading screen length
 #define FRAME_MS       33
-#define TWIN_ALERT_MS  9000     // how long the evil twin alert stays on screen
+#define TWIN_ALERT_MS  11000    // how long the evil twin alert stays on screen
 #define TWIN_GONE_MS   15000    // twin is "gone" once one of its copies is silent this long
 // 1 = ignore twins whose two MACs come from the same maker (mesh WiFi / extenders
 //     often share one network name). 0 = report every same-name, different-MAC pair.
 #define TWIN_IGNORE_SAME_VENDOR 0
-#define THREAT_ALERT_MS 9000    // karma / beacon flood / auth flood alert time
+#define THREAT_ALERT_MS 12000   // karma / beacon flood / auth flood alert time
 #define AUTH_RATE      25       // auth/association requests per second = flood
 #define KARMA_NAMES    3        // one MAC using this many different WiFi names = karma
 #define FLOOD_NEW      20       // this many brand-new networks within 10 s = beacon flood
@@ -76,6 +82,8 @@ Adafruit_SSD1306 oled(128, 64, &Wire, -1);
 #define HUNT_MAX_MS    120000   // stop hunting an evil twin / karma device after 2 minutes
 #define CAM_SCORE      40       // ESP32-type device streaming this much = possible spy camera
 #define SAVER_MS       180000   // screen saver after 3 minutes without alerts (switch off in the menu)
+#define PET_MS         2000     // pet reaction animation before each alert's details
+#define PAGE_MS        4500     // details / advice pages switch this often
 #define MENU_IDLE_MS   30000    // settings menu saves and closes after 30 s without a button press
 
 // ================== TYPES ==================
@@ -83,11 +91,17 @@ enum AppState : uint8_t { ST_BOOT, ST_SCAN, ST_ALERT, ST_ENDED, ST_TWIN, ST_TWIN
 
 // on/off settings (order = order in the menu)
 enum Opt : uint8_t { O_DEAUTH, O_TWIN, O_CAPTURE, O_AUTH, O_KARMA, O_FLOOD, O_TOOL, O_CAM, O_DRONE,
-                     O_PROBE, O_OPEN, O_HUNT, O_LED, O_SAVER, O_COUNT };
+                     O_PROBE, O_OPEN, O_HUNT, O_LED, O_SAVER, O_PET, O_COUNT };
 // menu rows after the switches
 enum { M_SENS = O_COUNT, M_RESET, M_SAVE, M_ROWS };
 struct Config { uint32_t magic; uint8_t on[O_COUNT]; uint8_t sens; };
-#define CFG_MAGIC 0x47414D31UL   // "GAM1"
+#define CFG_MAGIC 0x47414D32UL   // "GAM2"
+
+// pet face: eye size/position + eyelids (all floats so it can be animated smoothly)
+struct Face { float lx, ly, w, h, sep, angry, tired, happy, sqL, sqR; };
+enum Mood : uint8_t { MD_NORMAL, MD_ANGRY, MD_TIRED, MD_HAPPY, MD_SHOCK, MD_SQUINT, MD_SUSPECT, MD_SLEEP, MD_SMALL };
+enum React : int8_t { R_NONE = -1, R_DEAUTH, R_COMBO, R_TWIN, R_CAPTURE, R_AUTH, R_KARMA, R_TOOL, R_CAM, R_DRONE, R_FLOOD, R_ENDED, R_GONE };
+struct Advice { const char *title; uint8_t risk; const char *l[4]; };
 
 struct DeauthEvt { uint8_t src[6], dst[6], bss[6]; uint16_t reason; int8_t rssi; uint8_t ch, type; };
 struct MacEvt { uint8_t mac[6]; int8_t rssi; };
@@ -98,7 +112,7 @@ struct Attacker {
   uint8_t ch;
   int8_t rssi;
   uint16_t reason;
-  uint32_t count, prevCount, rate, first, last;
+  uint32_t count, prevCount, rate, peak, first, last;
 };
 
 struct Contact { bool used, evil; uint8_t mac[6]; int8_t rssi; uint32_t last; };
@@ -968,7 +982,11 @@ void secondTick(uint32_t now) {
   deauthRate = dc - secDeauth; secDeauth = dc;
   pktRate = pc - secPkt; secPkt = pc;
   if (locked && deauthRate >= attackRate) hot(now, curCh);
-  for (int i = 0; i < 8; i++) if (att[i].used) { att[i].rate = att[i].count - att[i].prevCount; att[i].prevCount = att[i].count; }
+  for (int i = 0; i < 8; i++) if (att[i].used) {
+    att[i].rate = att[i].count - att[i].prevCount;
+    att[i].prevCount = att[i].count;
+    if (att[i].rate > att[i].peak) att[i].peak = att[i].rate;
+  }
   for (int c = 1; c <= CH_MAX; c++) {
     deauthChSec[c] = 0;
     chPeak[c] = chPeak[c] * 9 / 10;
@@ -1020,6 +1038,22 @@ void ledTick(uint32_t now) {
 }
 
 // ================== VIEW: RADAR ==================
+int threatLabels(const char **lab, uint32_t now) {
+  int nl = 0;
+  bool twin = false;
+  for (int i = 0; i < 4; i++) twin |= twinActive(twins[i], now);
+  if (attack) lab[nl++] = "DEAUTH";
+  if (twin) lab[nl++] = "TWIN!";
+  if (th[TH_CAPTURE].active) lab[nl++] = "PASS!";
+  if (th[TH_AUTH].active) lab[nl++] = "AUTH!";
+  if (th[TH_KARMA].active) lab[nl++] = "KARMA";
+  if (th[TH_FLOOD].active) lab[nl++] = "FLOOD";
+  if (th[TH_TOOL].active) lab[nl++] = tool.pwn ? "PWN!" : "TOOL!";
+  if (th[TH_CAM].active) lab[nl++] = "CAM!";
+  if (th[TH_DRONE].active) lab[nl++] = "DRONE";
+  return nl;
+}
+
 void drawRadar(uint32_t now) {
   const int cx = 31, cy = 33, R = 29;
   oled.drawCircle(cx, cy, R, WH);
@@ -1060,18 +1094,7 @@ void drawRadar(uint32_t now) {
   int dots = (now / 300) % 4;
   // badges for threats that are still going on (cycle through them)
   const char *lab[9];
-  int nl = 0;
-  bool twin = false;
-  for (int i = 0; i < 4; i++) twin |= twinActive(twins[i], now);
-  if (attack) lab[nl++] = "DEAUTH";
-  if (twin) lab[nl++] = "TWIN!";
-  if (th[TH_CAPTURE].active) lab[nl++] = "PASS!";
-  if (th[TH_AUTH].active) lab[nl++] = "AUTH!";
-  if (th[TH_KARMA].active) lab[nl++] = "KARMA";
-  if (th[TH_FLOOD].active) lab[nl++] = "FLOOD";
-  if (th[TH_TOOL].active) lab[nl++] = tool.pwn ? "PWN!" : "TOOL!";
-  if (th[TH_CAM].active) lab[nl++] = "CAM!";
-  if (th[TH_DRONE].active) lab[nl++] = "DRONE";
+  int nl = threatLabels(lab, now);
   if (nl) {
     if ((now / 300) % 2) { oled.fillRect(64, 0, 40, 9, WH); txt(66, 1, lab[(now / 1200) % nl], 1, BK); }
   } else {
@@ -1125,22 +1148,17 @@ void drawAlert(uint32_t now) {
     if ((t / 120) % 2) oled.fillRect(0, 0, 128, 64, INV);
     return;
   }
-  // header: moving hazard stripes
-  oled.fillRect(0, 0, 128, 11, WH);
-  int off = (now / 40) % 12;
-  for (int x = -12 + off; x < 128; x += 12) {
-    oled.fillTriangle(x, 11, x + 6, 0, x + 10, 0, BK);
-    oled.fillTriangle(x, 11, x + 4, 11, x + 10, 0, BK);
-  }
-  bool blink = (now / 300) % 2;
-  oled.fillRect(17, 1, 94, 9, blink ? BK : WH);
-  txtC(2, "DEAUTH ATTACK", 1, blink ? WH : BK);
+  hazardHeader(now, "DEAUTH ATTACK");
 
   int idx[8];
   int n = activeAttackers(idx, now);
   if (n == 0) { txtC(28, "waiting for frames", 1, WH); return; }
-  int sel = ((t - 1600) / ATTACKER_MS) % n;        // several attackers: show each in turn
+  uint32_t tt = t - 1600;
+  int page = (tt / PAGE_MS) % 2;                  // page 1: addresses, page 2: attack analysis
+  int sel = (tt / (2 * PAGE_MS)) % n;             // several attackers: show each in turn
   Attacker &a = att[idx[sel]];
+  pageDots(page, 2);
+  if (page == 1) { drawDeauthInfo(now, a, sel, n); return; }
   fmtMac(mac, a.src);
   snprintf(b, sizeof b, "SRC %s", mac);  txt(0, 13, b, 1, WH);
   if (isBroadcast(a.dst)) snprintf(b, sizeof b, "DST ALL DEVICES");
@@ -1207,11 +1225,17 @@ void drawTwin(uint32_t now) {
   }
   // header with mirrored moving dots
   oled.fillRect(0, 0, 128, 11, WH);
-  int off = (now / 60) % 8;
-  for (int x = off; x < 64; x += 8) { oled.fillRect(x, 4, 3, 3, BK); oled.fillRect(124 - x, 4, 3, 3, BK); }
+  if (((t - 1800) / PAGE_MS) % 2) { drawAdvice(now, 7); return; }
   bool blink = (now / 300) % 2;
-  oled.fillRect(30, 1, 68, 9, blink ? BK : WH);
-  txtC(2, "EVIL TWIN?", 1, blink ? WH : BK);
+  if (petOn()) hazardHeader(now, "EVIL TWIN?");
+  else {                                        // classic header with mirrored moving dots
+    oled.fillRect(0, 0, 128, 11, WH);
+    int off = (now / 60) % 8;
+    for (int x = off; x < 64; x += 8) { oled.fillRect(x, 4, 3, 3, BK); oled.fillRect(124 - x, 4, 3, 3, BK); }
+    oled.fillRect(30, 1, 68, 9, blink ? BK : WH);
+    txtC(2, "EVIL TWIN?", 1, blink ? WH : BK);
+  }
+  pageDots(0, 2);
   char b[28];
   snprintf(b, sizeof b, "SSID %.16s", tw.ssid);
   txt(0, 13, b, 1, WH);
@@ -1233,10 +1257,19 @@ void hazardHeader(uint32_t now, const char *title) {
     oled.fillTriangle(x, 11, x + 6, 0, x + 10, 0, BK);
     oled.fillTriangle(x, 11, x + 4, 11, x + 10, 0, BK);
   }
+  int x0 = 0;
+  if (petOn()) {                                // tiny angry pet eyes at the left of the header
+    oled.fillRect(0, 0, 25, 11, WH);
+    Face f = {0, 0, 8, 8, 5.5f, 0.45f, 0, 0, 0, 0};
+    f.lx = sinf(now / 350.0f) * 1.5f;
+    drawFace(12, 5, f, blinkAmt(now), BK, WH);
+    x0 = 25;
+  }
   bool blink = (now / 250) % 2;
   int w = strlen(title) * 6 + 6;
-  oled.fillRect((128 - w) / 2, 1, w, 9, blink ? BK : WH);
-  txtC(2, title, 1, blink ? WH : BK);
+  int x = x0 + (128 - x0 - w) / 2;
+  oled.fillRect(x, 1, w, 9, blink ? BK : WH);
+  txt(x + 3, 2, title, 1, blink ? WH : BK);
 }
 
 void horns(int x, int y) {
@@ -1273,7 +1306,9 @@ void drawCombo(uint32_t now) {
     }
     return;
   }
+  if (((t - 2400) / PAGE_MS) % 2) { drawAdvice(now, 8); return; }
   hazardHeader(now, "COMBO ATTACK");
+  pageDots(0, 2);
   snprintf(b, sizeof b, "SSID %.16s", tw.ssid);
   txt(0, 13, b, 1, WH);
   fmtMac(m, comboReal);
@@ -1334,6 +1369,8 @@ void bubble(int x, int y, const char *s) {
 void drawThreat(uint32_t now) {
   uint32_t t = now - stateStart;
   char b[28], m[18];
+  if (t >= 2600 && ((t - 2600) / PAGE_MS) % 2) { drawAdvice(now, thSel); return; }   // page 2: what to do
+  if (t >= 2600) pageDots(0, 2);
   if (thSel == TH_CAPTURE) {
     if (t < 2600) {                                  // handshake flies between router and phone, a spy eye copies it
       routerIcon(20, 36);
@@ -1597,6 +1634,14 @@ void drawHunt(uint32_t now) {
   oled.drawLine(cx, cy, cx + cosf(na) * (R - 4), cy + sinf(na) * (R - 4), WH);
   oled.drawLine(cx + 1, cy, cx + 1 + cosf(na) * (R - 4), cy + sinf(na) * (R - 4), WH);
   oled.fillCircle(cx, cy, 3, WH);
+  if (petOn()) {                                 // pet eyes grow as you get closer
+    Face f = moodFace(MD_SMALL);
+    float sz = 6 + sgl * 7;
+    f.w = sz; f.h = lost ? 2 : sz; f.sep = 7 + sgl * 3;
+    f.lx = (sgl - 0.5f) * 6;
+    if (sgl > 0.75f) f.happy = 0.4f;
+    drawFace(cx, cy - 18, f, blinkAmt(now), WH, BK);
+  }
 
   const char *word;
   if (lost) word = (now / 400) % 2 ? "NO SIGNAL" : "";
@@ -1685,16 +1730,398 @@ void drawSaver(uint32_t now) {
   txt(x + 12, y - 3, b, 1, WH);
 }
 
+// ================== PET FACE ==================
+Face fc = {0, 0, 30, 30, 21, 0, 0, 0, 0, 0}, ft = fc;   // current face and the face it is moving towards
+float lookX = 0, lookY = 0;
+uint32_t nextBlink = 0, blinkAt = 0, nextLook = 0, happyUntil = 0;
+int lastDevs = 0;
+int dotsPage = -1;
+
+bool petOn() { return cfg.on[O_PET]; }
+
+float blinkAmt(uint32_t now) {                 // 1 = open, 0 = closed
+  if ((int32_t)(now - nextBlink) >= 0) { blinkAt = now; nextBlink = now + 1800 + random(3500); }
+  uint32_t d = now - blinkAt;
+  if (d < 70) return 1 - d / 70.0f;
+  if (d < 140) return (d - 70) / 70.0f;
+  return 1;
+}
+
+Face moodFace(uint8_t m) {
+  Face f = {0, 0, 30, 30, 21, 0, 0, 0, 0, 0};
+  switch (m) {
+    case MD_ANGRY:   f.angry = 0.5f; f.h = 26; break;
+    case MD_TIRED:   f.tired = 0.45f; f.h = 26; break;
+    case MD_HAPPY:   f.happy = 0.55f; break;
+    case MD_SHOCK:   f.w = 34; f.h = 36; f.sep = 23; break;
+    case MD_SQUINT:  f.h = 12; f.w = 32; break;
+    case MD_SUSPECT: f.sqL = 0.5f; f.angry = 0.15f; break;
+    case MD_SLEEP:   f.h = 3; f.w = 26; break;
+    case MD_SMALL:   f.w = 16; f.h = 16; f.sep = 16; break;
+  }
+  return f;
+}
+
+void tweenFace(Face &c, const Face &t, float k) {
+  float *a = &c.lx;
+  const float *b = &t.lx;
+  for (int i = 0; i < 10; i++) a[i] += (b[i] - a[i]) * k;
+}
+
+// two rounded eyes; eyelids are cut out with the background colour
+void drawFace(int cx, int cy, const Face &f, float open, uint16_t fg, uint16_t bg) {
+  for (int s = -1; s <= 1; s += 2) {
+    int w = imax(2, (int)f.w), h = imax(2, (int)(f.h * open));
+    int ex = cx + (int)(s * f.sep + f.lx), ey = cy + (int)f.ly;
+    int x0 = ex - w / 2, y0 = ey - h / 2;
+    int r = imax(1, imin(w, h) / 4);
+    oled.fillRoundRect(x0, y0, w, h, r, fg);
+    int inner = s < 0 ? x0 + w : x0 - 1, outer = s < 0 ? x0 - 1 : x0 + w;
+    if (f.angry > 0.02f) oled.fillTriangle(x0 - 1, y0 - 1, x0 + w, y0 - 1, inner, y0 + (int)(h * f.angry), bg);
+    if (f.tired > 0.02f) oled.fillTriangle(x0 - 1, y0 - 1, x0 + w, y0 - 1, outer, y0 + (int)(h * f.tired), bg);
+    float sq = s < 0 ? f.sqL : f.sqR;
+    if (sq > 0.02f) oled.fillRect(x0 - 1, y0 - 1, w + 2, (int)(h * sq) + 1, bg);
+    if (f.happy > 0.02f) oled.fillRoundRect(x0 - 1, y0 + h - (int)(h * f.happy), w + 2, h, r + 2, bg);
+  }
+}
+
+void pageDots(int page, int n) { dotsPage = page; (void)n; }
+
+// thin line under the header: the solid half shows which page is on screen
+void drawPageBar() {
+  if (dotsPage < 0) return;
+  oled.drawFastHLine(0, 11, 128, BK);
+  for (int x = 0; x < 128; x++) if (x / 64 == dotsPage || x % 4 == 0) oled.drawPixel(x, 11, WH);
+  dotsPage = -1;
+}
+
+// ---- scanning face ----
+uint8_t scanMood(uint32_t now) {
+  if (deauthRate > 0) return MD_SUSPECT;                             // a few deauth frames: suspicious
+  if ((int32_t)(happyUntil - now) > 0) return MD_HAPPY;              // new device showed up
+  for (int i = 0; i < TH_COUNT; i++) if (th[i].active) return MD_ANGRY;   // a threat is still going on
+  for (int i = 0; i < 4; i++) if (twinActive(twins[i], now)) return MD_ANGRY;
+  return MD_NORMAL;
+}
+
+void drawPetScan(uint32_t now) {
+  int devs = 0;
+  for (int i = 0; i < 20; i++) devs += ct[i].used;
+  if (devs > lastDevs && now - stateStart > 1500) { happyUntil = now + 900; lookY = -6; nextLook = now + 900; }
+  lastDevs = devs;
+  if ((int32_t)(now - nextLook) >= 0) {        // look somewhere else now and then
+    nextLook = now + 600 + random(2200);
+    lookX = random(-20, 21);
+    lookY = random(-5, 6);
+    if (random(4) == 0) lookX = lookY = 0;
+  }
+  ft = moodFace(scanMood(now));
+  ft.lx = bannerOn ? 0 : lookX;                // a popup appeared: look down at it
+  ft.ly = bannerOn ? 7 : lookY;
+  tweenFace(fc, ft, 0.3f);
+  drawFace(64, 25, fc, blinkAmt(now), WH, BK);
+
+  // status bar
+  char b[24];
+  oled.drawFastHLine(0, 53, 128, WH);
+  snprintf(b, sizeof b, "CH%02u", curCh);
+  if (manualCh) { oled.fillRect(0, 55, 25, 9, WH); txt(1, 56, b, 1, BK); }   // inverted = channel fixed
+  else txt(1, 56, b, 1, WH);
+  snprintf(b, sizeof b, "%ddev", devs);
+  txt(32, 56, b, 1, WH);
+  if (deauthRate > 0) { if ((now / 250) % 2) { snprintf(b, sizeof b, "D%lu/s", (unsigned long)deauthRate); txt(70, 56, b, 1, WH); } }
+  else { snprintf(b, sizeof b, "%lup/s", (unsigned long)pktRate); txt(70, 56, b, 1, WH); }
+  // tiny radar in the corner
+  oled.drawCircle(121, 58, 5, WH);
+  float a = fmodf(now * 0.006f, TWO_PI);
+  oled.drawLine(121, 58, 121 + cosf(a) * 4, 58 + sinf(a) * 4, WH);
+  // threats still going on: blinking badge top-left
+  const char *lab[9];
+  int nl = threatLabels(lab, now);
+  if (nl && (now / 300) % 2) { oled.fillRoundRect(0, 0, 40, 10, 2, WH); txt(3, 1, lab[(now / 1200) % nl], 1, BK); }
+}
+
+void drawPetSaver(uint32_t now) {             // sleeping face drifting around (no burn-in), screen dimmed
+  float t = now / 1000.0f;
+  int x = 64 + sinf(t * 0.21f) * 28, y = 30 + sinf(t * 0.17f + 1) * 14;
+  drawFace(x, y, moodFace(MD_SLEEP), 1, WH, BK);
+  for (int k = 0; k < 3; k++) {
+    float ph = fmodf(t * 0.5f + k / 3.0f, 1.0f);
+    txt(x + 34 + ph * 8, y - 4 - ph * 18, "z", 1, WH);
+  }
+}
+
+// ---- reaction animations (one per attack) ----
+int8_t reactKind() {
+  static const int8_t M[TH_COUNT] = {R_CAPTURE, R_AUTH, R_KARMA, R_TOOL, R_CAM, R_DRONE, R_FLOOD};
+  switch (state) {
+    case ST_ALERT:    return comboTwin >= 0 ? R_COMBO : R_DEAUTH;
+    case ST_TWIN:     return R_TWIN;
+    case ST_ENDED:    return R_ENDED;
+    case ST_TWINGONE: return R_GONE;
+    case ST_THREAT:   return M[thSel];
+    default:          return R_NONE;
+  }
+}
+bool reacting(uint32_t now) { return petOn() && reactKind() != R_NONE && now - stateStart < PET_MS; }
+
+void speech(uint32_t t, const char *s) {       // label that pops up at the bottom
+  if (t < 350) return;
+  int w = strlen(s) * 6 + 8, x = (128 - w) / 2;
+  int y = 52 + (t < 500 ? (int)(500 - t) / 30 : 0);
+  oled.fillRoundRect(x, y, w, 12, 3, WH);
+  txt(x + 4, y + 2, s, 1, BK);
+}
+
+void bolt(int x, int y) {
+  for (int k = 0; k < 2; k++) {
+    oled.drawLine(x + k, y, x - 4 + k, y + 7, WH);
+    oled.drawLine(x - 4 + k, y + 7, x + 1 + k, y + 8, WH);
+    oled.drawLine(x + 1 + k, y + 8, x - 3 + k, y + 16, WH);
+  }
+}
+
+void drop(int x, int y) {                      // sweat drop
+  oled.fillCircle(x, y, 2, WH);
+  oled.fillTriangle(x - 2, y, x + 2, y, x, y - 5, WH);
+}
+
+void sparkle(int x, int y, int r) {
+  oled.drawFastHLine(x - r, y, r * 2 + 1, WH);
+  oled.drawFastVLine(x, y - r, r * 2 + 1, WH);
+}
+
+void drawReaction(uint32_t now) {
+  uint32_t t = now - stateStart;
+  int8_t k = reactKind();
+  float open = blinkAmt(now);
+  Face f;
+  switch (k) {
+    case R_DEAUTH:
+    case R_COMBO: {                            // shocked, then furious and shaking, lightning on both sides
+      f = moodFace(t < 350 ? MD_SHOCK : MD_ANGRY);
+      if (t >= 350) { f.lx = random(-2, 3); f.ly = random(-1, 2); }
+      drawFace(64, 26, f, 1, WH, BK);
+      if (k == R_COMBO && t >= 350) {          // devil horns: an evil twin is helping
+        oled.fillTriangle(30, 13, 25, 1, 38, 11, WH);
+        oled.fillTriangle(98, 13, 103, 1, 90, 11, WH);
+      }
+      if ((t / 90) % 2) { bolt(10, 6 + (t / 60) % 8); bolt(120, 12 - (t / 60) % 8); }
+      if (t > 350 && (t / 200) % 2) { txt(2, 34, "!", 2, WH); txt(116, 34, "!", 2, WH); }
+      uint32_t flashEnd = k == R_COMBO ? 1100 : 650;
+      if (t > 350 && t < flashEnd && (t / 80) % 2) oled.fillRect(0, 0, 128, 64, INV);
+      speech(t, k == R_COMBO ? "COMBO ATTACK!" : "DEAUTH ATTACK!");
+      break;
+    }
+    case R_TWIN: {                             // the face splits in two, the copy grows horns
+      float p = ease(t / 700.0f);
+      int dx = p * 32;
+      Face a = moodFace(MD_SMALL), b = moodFace(MD_SMALL);
+      if (t > 800) { a.tired = 0.4f; b.angry = 0.55f; }
+      drawFace(64 - dx, 26, a, open, WH, BK);
+      if (t < 800 || (t / 100) % 4) drawFace(64 + dx, 26, b, open, WH, BK);
+      if (t > 800) {
+        int x = 64 + dx;
+        oled.fillTriangle(x - 16, 17, x - 21, 6, x - 10, 15, WH);
+        oled.fillTriangle(x + 16, 17, x + 21, 6, x + 10, 15, WH);
+      }
+      if (t < 700) for (int y = 8; y < 46; y += 3) oled.drawPixel(64, y, WH);   // mirror line
+      speech(t, "EVIL TWIN!");
+      break;
+    }
+    case R_CAPTURE: {                          // wide eyes, sweating, the key (password) floats away
+      f = moodFace(MD_SHOCK);
+      drawFace(64, 23, f, open, WH, BK);
+      oled.drawCircle(64, 47, 3, WH);          // "O" mouth
+      drop(115, 6 + (t / 30) % 28);
+      int ky = 46 - (int)((t % 1100) * 44 / 1100);
+      oled.drawCircle(9, ky, 3, WH);
+      oled.drawFastVLine(9, ky + 3, 8, WH);
+      oled.drawFastHLine(9, ky + 9, 3, WH);
+      oled.drawFastHLine(9, ky + 6, 2, WH);
+      speech(t, "PASSWORD THIEF!");
+      break;
+    }
+    case R_AUTH: {                             // dizzy eyes going round, fake devices swarm in
+      for (int i = 0; i < 16; i++) {
+        float a = (hsh8(i) / 255.0f) * TWO_PI;
+        float ph = fmodf(t / 600.0f + i / 16.0f, 1.0f);
+        float r = 70 - ph * 50;
+        oled.fillRect(64 + cosf(a) * r, 26 + sinf(a) * r * 0.6f, 2, 2, WH);
+      }
+      f = moodFace(MD_SMALL);
+      f.w = f.h = 20; f.sep = 18;
+      f.lx = cosf(t / 110.0f) * 8;
+      f.ly = sinf(t / 110.0f) * 5;
+      drawFace(64, 26, f, 1, WH, BK);
+      speech(t, "AUTH FLOOD!");
+      break;
+    }
+    case R_FLOOD: {                            // fake WiFi signs raining, eyes darting everywhere
+      for (int c = 0; c < 6; c++) {
+        int x = 8 + c * 22, y = (int)((t / 5 + c * 17) % 62) - 6;
+        oled.fillCircle(x, y + 6, 1, WH);
+        oled.drawCircleHelper(x, y + 6, 4, 0x1 | 0x2, WH);
+        oled.drawCircleHelper(x, y + 6, 7, 0x1 | 0x2, WH);
+      }
+      f = moodFace(MD_NORMAL);
+      f.w = f.h = 24;
+      int j = t / 150;
+      f.lx = (int)(hsh8(j) % 37) - 18;
+      f.ly = (int)(hsh8(j + 7) % 11) - 5;
+      drawFace(64, 26, f, 1, WH, BK);
+      speech(t, "BEACON FLOOD!");
+      break;
+    }
+    case R_KARMA: {                            // suspicious squint, question marks pop up
+      f = moodFace(MD_SUSPECT);
+      f.lx = sinf(t / 300.0f) * 14;
+      drawFace(64, 26, f, open, WH, BK);
+      if (t > 300) txt(0, 6, "?", 2, WH);
+      if (t > 600) txt(116, 10, "?", 2, WH);
+      if (t > 900 && (t / 200) % 2) txt(0, 32, "?", 1, WH);
+      speech(t, "KARMA TRAP!");
+      break;
+    }
+    case R_TOOL: {                             // narrow glare at a speech bubble with the tool
+      f = moodFace(MD_ANGRY);
+      f.h = 16; f.angry = 0.6f;
+      f.lx = t < 500 ? 0 : 10;
+      f.ly = t < 500 ? 0 : -3;
+      drawFace(52, 30, f, open, WH, BK);
+      if (t > 500) {
+        oled.fillRoundRect(90, 0, 38, 17, 4, WH);
+        oled.fillTriangle(94, 16, 100, 16, 90, 22, WH);
+        const char *face = tool.pwn ? ((t / 300) % 2 ? "(O_O)" : "(^_^)") : "x_x";
+        txt(109 - (int)strlen(face) * 3, 5, face, 1, BK);
+      }
+      speech(t, tool.pwn ? "PWNAGOTCHI!" : "HACK TOOL!");
+      break;
+    }
+    case R_CAM: {                              // squinting, searching, focus brackets close in, REC
+      f = moodFace(MD_SQUINT);
+      f.lx = sinf(t / 250.0f) * 16;
+      drawFace(64, 28, f, 1, WH, BK);
+      int z = t < 800 ? 16 - (int)t / 50 : 0;
+      int L = 6 - z, R = 121 + z, T = 10 - z / 2, B = 46 + z / 2;
+      oled.drawFastHLine(L, T, 8, WH); oled.drawFastVLine(L, T, 8, WH);
+      oled.drawFastHLine(R - 7, T, 8, WH); oled.drawFastVLine(R, T, 8, WH);
+      oled.drawFastHLine(L, B, 8, WH); oled.drawFastVLine(L, B - 7, 8, WH);
+      oled.drawFastHLine(R - 7, B, 8, WH); oled.drawFastVLine(R, B - 7, 8, WH);
+      if ((t / 300) % 2) { oled.fillCircle(4, 3, 2, WH); txt(9, 0, "REC", 1, WH); }
+      speech(t, "SPY CAMERA?");
+      break;
+    }
+    case R_DRONE: {                            // eyes look up and follow a drone flying past
+      int dxp = (int)(t / 7) % 170 - 20;
+      oled.drawLine(dxp - 7, 3, dxp + 7, 7, WH);
+      oled.drawLine(dxp - 7, 7, dxp + 7, 3, WH);
+      oled.fillRect(dxp - 2, 4, 5, 3, WH);
+      int w = (t / 40) % 2 ? 4 : 2;
+      oled.drawFastHLine(dxp - 7 - w, 2, w * 2, WH); oled.drawFastHLine(dxp + 7 - w, 2, w * 2, WH);
+      oled.drawFastHLine(dxp - 7 - w, 8, w * 2, WH); oled.drawFastHLine(dxp + 7 - w, 8, w * 2, WH);
+      f = moodFace(MD_NORMAL);
+      f.w = 26; f.h = 24; f.ly = -5;
+      f.lx = constrain((dxp - 64) / 4, -14, 14);
+      drawFace(64, 33, f, open, WH, BK);
+      speech(t, "DRONE ABOVE!");
+      break;
+    }
+    case R_ENDED: {                            // happy bouncing eyes with sparkles
+      f = moodFace(MD_HAPPY);
+      f.ly = -fabsf(sinf(t / 170.0f)) * 5;
+      drawFace(64, 28, f, 1, WH, BK);
+      for (int i = 0; i < 5; i++) if ((t / 150 + i) % 3 == 0) sparkle(8 + hsh8(i) % 112, 4 + hsh8(i + 3) % 40, 2 + i % 2);
+      speech(t, "ALL SAFE :)");
+      break;
+    }
+    case R_GONE: {                             // relieved: tired eyes turn happy, the twin goes poof
+      f = moodFace(t < 800 ? MD_TIRED : MD_HAPPY);
+      drawFace(64, 28, f, open, WH, BK);
+      for (int i = 0; i < 8; i++) {
+        float a = i * PI / 4, r = 4 + (t % 900) / 40.0f;
+        oled.drawPixel(112 + cosf(a) * r, 12 + sinf(a) * r, WH);
+      }
+      speech(t, "TWIN GONE");
+      break;
+    }
+    default: break;
+  }
+}
+
+// ---- extra info pages ----
+const char *reasonText(uint16_t r) {
+  switch (r) {
+    case 1: return "unspecified";
+    case 2: return "auth expired";
+    case 3: return "leaving";
+    case 4: return "inactive";
+    case 5: return "AP full";
+    case 6: return "class2 frame";
+    case 7: return "class3 frame";
+    case 8: return "left network";
+    default: return "other";
+  }
+}
+
+void drawDeauthInfo(uint32_t now, const Attacker &a, int sel, int n) {
+  char b[28];
+  snprintf(b, sizeof b, "REASON %u %s", a.reason, reasonText(a.reason)); txt(0, 13, b, 1, WH);
+  if (macEq(a.src, a.bss)) txt(0, 22, "FAKES THE ROUTER MAC", 1, WH);
+  else if (a.src[0] & 0x02) txt(0, 22, "RANDOM / SPOOFED MAC", 1, WH);
+  else txt(0, 22, "FROM A DEVICE MAC", 1, WH);
+  txt(0, 31, isBroadcast(a.dst) ? "KICKS: ALL DEVICES" : "KICKS: ONE DEVICE", 1, WH);
+  snprintf(b, sizeof b, "TIME %lus PEAK %lu/s", (unsigned long)((now - attackStart) / 1000), (unsigned long)a.peak); txt(0, 40, b, 1, WH);
+  snprintf(b, sizeof b, "TOTAL %lu frames", (unsigned long)(deauthRaw - attackStartPkts)); txt(0, 49, b, 1, WH);
+  snprintf(b, sizeof b, "%d/%d", sel + 1, n);
+  txt(0, 57, b, 1, WH);
+  int risk = a.peak > 100 ? 5 : (a.peak > 30 ? 4 : 3);
+  txt(40, 57, "RISK", 1, WH);
+  for (int i = 0; i < 5; i++) {
+    if (i < risk) oled.fillRect(68 + i * 12, 57, 10, 7, WH); else oled.drawRect(68 + i * 12, 57, 10, 7, WH);
+  }
+}
+
+const Advice ADV[] = {
+  {"PASSWORD CAPTURE", 5, {"Hacker grabbed the", "WiFi login handshake", "Use 12+ char pass", "Turn on WPA3/PMF"}},
+  {"AUTH FLOOD",       3, {"Fake devices spam", "the router to jam it", "Devices may drop", "Hunt finds the box"}},
+  {"KARMA/PINEAPPLE",  4, {"Fake AP copies names", "your phone remembers", "Turn off auto-join", "Forget open WiFi"}},
+  {"HACK TOOL",        4, {"An attack gadget is", "running nearby", "Expect deauth or", "fake WiFi next"}},
+  {"CAMERA NEARBY",    3, {"A WiFi camera is on", "Check clocks, vents,", "chargers, detectors", "Hunt mode = find it"}},
+  {"DRONE NEARBY",     2, {"A drone WiFi signal", "is in range", "Look up and around", "Hunt mode = find it"}},
+  {"BEACON FLOOD",     2, {"Spam of fake WiFi", "names in your list", "Don't join unknown", "networks right now"}},
+  {"EVIL TWIN?",       4, {"A copy of a WiFi", "network is on air", "Don't join the copy", "Check MAC and lock"}},
+  {"COMBO ATTACK",     5, {"You get kicked off", "so you join the fake", "Stay off this WiFi", "Use mobile data"}},
+};
+
+void drawAdvice(uint32_t now, int k) {
+  const Advice &a = ADV[k];
+  hazardHeader(now, a.title);
+  pageDots(1, 2);
+  txt(0, 14, a.l[0], 1, WH);
+  txt(0, 23, a.l[1], 1, WH);
+  char b[24];
+  snprintf(b, sizeof b, "> %s", a.l[2]); txt(0, 34, b, 1, WH);
+  snprintf(b, sizeof b, "> %s", a.l[3]); txt(0, 43, b, 1, WH);
+  txt(0, 56, "RISK", 1, WH);
+  for (int i = 0; i < 5; i++) {
+    bool on = i < a.risk && !(i == a.risk - 1 && a.risk >= 4 && (now / 300) % 2);
+    if (on) oled.fillRect(28 + i * 11, 56, 9, 7, WH); else oled.drawRect(28 + i * 11, 56, 9, 7, WH);
+  }
+  txt(88, 56, a.risk <= 2 ? "LOW" : (a.risk == 3 ? "MED" : "HIGH"), 1, WH);
+}
+
 // ================== SETTINGS ==================
 const char *OPT_NAME[O_COUNT] = {"Deauth attack", "Evil twin", "Password capt", "Auth flood", "Karma/Pineapl",
                                  "Beacon flood", "Hack tools", "Hidden camera", "Drone", "Probe popups",
-                                 "Open WiFi pop", "Hunt mode", "LED", "Screen saver"};
+                                 "Open WiFi pop", "Hunt mode", "LED", "Screen saver", "Pet face"};
 const char *SENS_NAME[3] = {"LOW", "MED", "HIGH"};
 const uint8_t SENS_RATE[3] = {30, 10, 3};
 
 void defaultCfg() {
   cfg.magic = CFG_MAGIC;
   for (int i = 0; i < O_COUNT; i++) cfg.on[i] = 1;
+  cfg.on[O_PET] = 0;                           // classic radar UI by default; turn the pet on in settings
   cfg.sens = 1;
 }
 
@@ -1840,10 +2267,10 @@ void onKey(uint8_t k, uint32_t now) {
     case ST_BOOT: if (k == 1) state = ST_SCAN; break;
     case ST_HUNT: if (k == 1) { stopHunt(); toast("HUNT STOPPED", now); } break;
     case ST_ALERT:                             // skip straight to hunt mode (or back to the radar)
-      if (k == 1) { if (cfg.on[O_HUNT]) stateStart = now - HUNT_AFTER_MS - 1; else state = ST_SCAN; }
+      if (k == 1) { if (cfg.on[O_HUNT]) stateStart = now - HUNT_AFTER_MS - PET_MS - 1; else state = ST_SCAN; }
       break;
-    case ST_TWIN:   if (k == 1) stateStart = now - TWIN_ALERT_MS - 1; break;
-    case ST_THREAT: if (k == 1) stateStart = now - THREAT_ALERT_MS - 1; break;
+    case ST_TWIN:   if (k == 1) stateStart = now - TWIN_ALERT_MS - PET_MS - 1; break;
+    case ST_THREAT: if (k == 1) stateStart = now - THREAT_ALERT_MS - PET_MS - 1; break;
     default:        if (k == 1) state = ST_SCAN; break;   // ended / twin gone
   }
 }
@@ -1868,7 +2295,7 @@ void buttonsTick(uint32_t now) {
 }
 
 // ================== BOOT ==================
-void drawBoot(uint32_t now) {
+void drawBootClassic(uint32_t now) {
   uint32_t t = now - stateStart;
   int scan = imin(64, t / 12);
   txtC(8, "DEAUTH", 2, WH);
@@ -1890,6 +2317,35 @@ void drawBoot(uint32_t now) {
     oled.drawRect(14, 56, 100, 6, WH);
     oled.fillRect(16, 58, 96 * p, 2, WH);
   }
+}
+
+void drawBoot(uint32_t now) {
+  if (!petOn()) { drawBootClassic(now); return; }
+  uint32_t t = now - stateStart;
+  // the pet wakes up: eyes open, blink, smile
+  Face f = moodFace(MD_NORMAL);
+  f.w = 24; f.h = 22; f.sep = 17;
+  float open = t < 600 ? t / 600.0f : ((t > 900 && t < 1050) ? 0.1f : 1);
+  if (t > 1300) f.happy = 0.5f;
+  if (t > 1300 && t < 1800) f.ly = -fabsf(sinf((t - 1300) / 80.0f)) * 3;
+  drawFace(64, 15, f, open, WH, BK);
+  if (t > 1100) {
+    const char *ttl = "GUARD PET";
+    int n = imin(strlen(ttl), (t - 1100) / 70);
+    char b[12];
+    memcpy(b, ttl, n); b[n] = 0;
+    txt((128 - (int)strlen(ttl) * 12) / 2, 32, b, 2, WH);
+  }
+  if (t > 1800) {
+    const char *by = "by Gamkers";
+    int n = imin(strlen(by), (t - 1800) / 60);
+    char b[20];
+    memcpy(b, by, n); b[n] = 0;
+    int x = (128 - (int)strlen(by) * 6) / 2;
+    txt(x, 54, b, 1, WH);
+    if (n < (int)strlen(by) && (t / 120) % 2) oled.fillRect(x + n * 6, 54, 5, 8, WH);
+  }
+  if (t < 500) for (int i = 0; i < 200 - (int)t / 3; i++) oled.drawPixel(random(128), random(64), INV);
 }
 
 // ================== SETUP / LOOP ==================
@@ -1928,9 +2384,10 @@ void loop() {
   buttonsTick(now);
   if (cfgDirty && state != ST_MENU) saveCfg();   // an alert closed the menu: keep the changes
 
+  uint32_t PD = petOn() ? PET_MS : 0;            // alerts start with the pet reaction
   if (state == ST_BOOT && now - stateStart > BOOT_MS) state = ST_SCAN;
-  if (state == ST_ENDED && now - stateStart > 4000) state = ST_SCAN;
-  if (state == ST_TWIN && now - stateStart > TWIN_ALERT_MS) {
+  if (state == ST_ENDED && now - stateStart > 4000 + PD) state = ST_SCAN;
+  if (state == ST_TWIN && now - stateStart > TWIN_ALERT_MS + PD) {
     Twin &tw = twins[twinSel];
     tw.shown = true;
     if (twinActive(tw, now)) {                    // hunt the copy: the newer one (or the open one)
@@ -1939,8 +2396,8 @@ void loop() {
       startHunt(H_TWIN, fake->bssid, fake->rssi, fake->ch, now);
     } else state = ST_SCAN;
   }
-  if (state == ST_TWINGONE && now - stateStart > 3000) state = ST_SCAN;
-  if (state == ST_THREAT && now - stateStart > THREAT_ALERT_MS) {
+  if (state == ST_TWINGONE && now - stateStart > 3000 + PD) state = ST_SCAN;
+  if (state == ST_THREAT && now - stateStart > THREAT_ALERT_MS + PD) {
     th[thSel].alerted = true;
     if (attack) startHunt(H_DEAUTH, nullptr, 0, 0, now);
     else if (thSel == TH_KARMA && th[TH_KARMA].active) startHunt(H_KARMA, kt[karmaSel].mac, kt[karmaSel].rssi, kt[karmaSel].ch, now);
@@ -1955,7 +2412,7 @@ void loop() {
     thSel = TH_CAPTURE; state = ST_THREAT; stateStart = now;
   }
   // deauth alert -> hunt mode after a while
-  if (state == ST_ALERT && attack && now - stateStart > HUNT_AFTER_MS) {
+  if (state == ST_ALERT && attack && now - stateStart > HUNT_AFTER_MS + PD) {
     int idx[8];
     int n = activeAttackers(idx, now);
     startHunt(H_DEAUTH, n ? att[idx[0]].src : nullptr, n ? att[idx[0]].rssi : 0, 0, now);
@@ -1989,7 +2446,11 @@ void loop() {
 
   if (frameDue()) {
     oled.clearDisplay();
-    switch (state) {
+    uint32_t ss = stateStart;
+    bool react = reacting(now);
+    if (react) drawReaction(now);                                         // pet reaction first
+    else if (petOn() && reactKind() != R_NONE) stateStart += PET_MS;      // then the normal screens
+    if (!react) switch (state) {
       case ST_BOOT:  drawBoot(now); break;
       case ST_ALERT: drawAlert(now); break;
       case ST_ENDED: drawEnded(now); break;
@@ -1998,11 +2459,15 @@ void loop() {
       case ST_THREAT: drawThreat(now); break;
       case ST_HUNT:   drawHunt(now); break;
       case ST_MENU:   drawMenu(now); break;
-      default:
-        if (saverOn(now)) drawSaver(now); else drawRadar(now);
+      case ST_SCAN:
+        if (saverOn(now)) { if (petOn()) drawPetSaver(now); else drawSaver(now); }
+        else if (petOn()) drawPetScan(now); else drawRadar(now);
         drawBanner(now);
         break;
+      default: break;
     }
+    stateStart = ss;
+    drawPageBar();
     drawToast(now);
     oled.display();
   }

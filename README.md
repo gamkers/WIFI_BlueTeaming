@@ -1,6 +1,6 @@
-# WiFi BlueTeaming
+# WiFi BlueTeaming Pet
 
-ESP8266 + 0.96" OLED **WiFi attack detector**, by **Gamkers**.
+A tiny ESP8266 robot pet with a 0.96" OLED that watches the WiFi around you for attacks, by **Gamkers**.
 It is fully **passive**: it only listens to WiFi traffic and never transmits.
 
 ## Flash from your browser
@@ -20,7 +20,7 @@ esptool.py --chip esp8266 --baud 460800 write_flash 0x0 firmware/esp8266_deauth_
 
 | Version | Folder | What it does |
 |---|---|---|
-| **Buttons + Settings** (recommended) | [`esp8266_deauth_detector_buttons`](esp8266_deauth_detector_buttons) | All detections, plus a settings menu to switch each one on/off (saved), sensitivity, channel lock |
+| **Buttons + Settings** (recommended) | [`esp8266_deauth_detector_buttons`](esp8266_deauth_detector_buttons) | All detections, a settings menu to switch each one on/off (saved), sensitivity, channel lock, and the optional **pet mode** |
 | **Full** | [`esp8266_deauth_detector`](esp8266_deauth_detector) | All detections, no buttons needed |
 | **Lite** | [`esp8266_deauth_detector_lite`](esp8266_deauth_detector_lite) | Deauth detection only |
 
@@ -36,6 +36,31 @@ esptool.py --chip esp8266 --baud 460800 write_flash 0x0 firmware/esp8266_deauth_
 - Popups for phones probing for networks and for open WiFi
 - Hunt mode: a signal meter (and LED brightness) to walk towards the device
 - Screen saver against OLED burn-in
+
+### Pet mode (Buttons version)
+
+The classic radar UI is the default. Turn on **Settings → Pet face** and the radar becomes a robot face:
+
+- Eyes look around while scanning, glance at new devices and look down at popups
+- A reaction animation for every attack, before the usual alert screens:
+
+| Attack | Pet reaction |
+|---|---|
+| Deauth | Shocked, then furious shaking eyes with lightning |
+| Combo | Furious eyes with devil horns and a strobe |
+| Evil twin | The face splits in two, the copy grows horns |
+| Password capture | Wide eyes, sweat drop, a key floating away |
+| Auth flood | Dizzy eyes while fake devices swarm in |
+| Beacon flood | Eyes darting under raining WiFi signs |
+| Karma / Pineapple | Suspicious squint with question marks |
+| Hack tool / Pwnagotchi | Glaring at a bubble showing the tool |
+| Hidden camera | Searching squint, focus brackets, REC |
+| Drone | Eyes follow a drone across the sky |
+| Attack ended | Happy bouncing eyes with sparkles |
+
+- Mini eyes in the alert headers, a sleeping-face screen saver, and eyes in hunt mode that grow as you get closer
+
+Both looks show a second page on every alert: a deauth analysis (reason code, spoofed MAC, peak rate, risk) or advice on what to do, with a risk rating.
 
 ## Pinout
 
