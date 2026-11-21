@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WiFi BlueTeaming Flasher</title>
+<meta name="description" content="Flash the ESP8266 WiFi BlueTeaming deauth detector firmware straight from your browser. By Gamkers.">
+<script type="module" src="https://unpkg.com/esp-web-tools@10.0.1/dist/web/install-button.js?module"></script>
+<style>
+  :root {
+    --bg: #0b0f0d; --panel: #121915; --line: #22302a; --text: #d8e6de; --muted: #8aa197;
+    --accent: #3ddc84; --accent-ink: #04140b; --warn: #ffb547; --code: #0e1411;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f4f7f5; --panel: #ffffff; --line: #d6e0da; --text: #13201a; --muted: #55685f;
+            --accent: #13985a; --accent-ink: #ffffff; --warn: #a35f00; --code: #eef3f0; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1040px; margin: 0 auto; padding: 32px 16px 64px; }
+  header { display: flex; align-items: center; gap: 16px; margin-bottom: 8px; }
+  .radar { width: 56px; height: 56px; flex: none; }
+  h1 { font-size: 28px; margin: 0; letter-spacing: .5px; }
+  .by { color: var(--muted); margin: 0 0 24px; }
+  .by a { color: var(--accent); }
+  h2 { font-size: 20px; margin: 40px 0 12px; }
+  .note { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--warn);
+          border-radius: 8px; padding: 12px 16px; color: var(--muted); }
+  .note b { color: var(--text); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px;
+          display: flex; flex-direction: column; }
+  .card h3 { margin: 0 0 4px; font-size: 18px; }
+  .tag { display: inline-block; font-size: 12px; font-weight: 600; color: var(--accent);
+         border: 1px solid var(--accent); border-radius: 99px; padding: 1px 10px; margin-bottom: 10px; }
+  .card ul { padding-left: 18px; margin: 8px 0 16px; color: var(--muted); font-size: 14px; flex: 1; }
+  .card .pins { font: 13px/1.5 ui-monospace, Menlo, monospace; background: var(--code); border-radius: 8px;
+                padding: 8px 10px; margin-bottom: 16px; }
+  esp-web-install-button button[slot="activate"], .btn {
+    background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 8px; padding: 10px 18px;
+    font: 600 15px system-ui, sans-serif; cursor: pointer; width: 100%; }
+  .btn.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent); margin-top: 8px;
+               display: block; text-align: center; text-decoration: none; }
+  .unsupported { color: var(--warn); font-size: 14px; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line);
+          border-radius: 12px; overflow: hidden; font-size: 15px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: .5px; }
+  tr:last-child td { border-bottom: 0; }
+  td code, li code { font: 13px ui-monospace, Menlo, monospace; background: var(--code); padding: 1px 6px; border-radius: 4px; }
+  .table-wrap { overflow-x: auto; }
+  ol li { margin-bottom: 6px; }
+  footer { margin-top: 48px; color: var(--muted); font-size: 14px; }
+  footer a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <svg class="radar" viewBox="0 0 56 56" aria-hidden="true">
+      <circle cx="28" cy="28" r="26" fill="none" stroke="currentColor" stroke-opacity=".35" stroke-width="2"/>
+      <circle cx="28" cy="28" r="16" fill="none" stroke="currentColor" stroke-opacity=".25" stroke-width="2"/>
+      <line x1="28" y1="28" x2="28" y2="3" stroke="#3ddc84" stroke-width="3" stroke-linecap="round">
+        <animateTransform attributeName="transform" type="rotate" from="0 28 28" to="360 28 28" dur="2.5s" repeatCount="indefinite"/>
+      </line>
+      <circle cx="38" cy="18" r="3" fill="#ff5c5c"/>
+    </svg>
+    <div><h1>WiFi BlueTeaming</h1></div>
+  </header>
+  <p class="by">ESP8266 deauth &amp; WiFi attack detector with an OLED display, by
+    <a href="https://github.com/gamkers">Gamkers</a>. Passive: it only listens and never transmits.</p>
+
+  <div class="note">
+    <b>How to flash:</b> use <b>Chrome or Edge on a computer</b> (Web Serial is needed). Plug in the board with a
+    USB data cable, click <b>Install</b>, pick the serial port and wait for it to finish. If no port shows up, install the
+    <b>CH340</b> or <b>CP2102</b> USB driver for your board.
+  </div>
+
+  <h2>Choose a version</h2>
+  <div class="grid">
+    <div class="card">
+      <span class="tag">RECOMMENDED</span>
+      <h3>Buttons + Settings</h3>
+      <ul>
+        <li>Every detection from the Full version</li>
+        <li>On-screen menu to switch each detection on/off (saved)</li>
+        <li>Sensitivity LOW / MED / HIGH</li>
+        <li>Fix the scanner to one channel or auto hop</li>
+        <li>Skip alerts, stop hunt mode with a button</li>
+      </ul>
+      <div class="pins">OLED SDA→D1  SCL→D2<br>UP→D5  OK→D6  DOWN→D7 (to GND)</div>
+      <esp-web-install-button manifest="firmware/manifest_deauth_detector_buttons.json">
+        <button slot="activate">Install Buttons version</button>
+        <span slot="unsupported" class="unsupported">Use Chrome or Edge on a computer to flash.</span>
+        <span slot="not-allowed" class="unsupported">Open this page over HTTPS to flash.</span>
+      </esp-web-install-button>
+      <a class="btn ghost" href="firmware/esp8266_deauth_detector_buttons.bin" download>Download .bin</a>
+    </div>
+
+    <div class="card">
+      <span class="tag">ALL DETECTIONS</span>
+      <h3>Full</h3>
+      <ul>
+        <li>Deauth / disassociation attacks with attacker MAC</li>
+        <li>Evil twin and combo (deauth + evil twin)</li>
+        <li>Password capture attempt, auth flood, karma/Pineapple, beacon flood</li>
+        <li>Pwnagotchi &amp; hack tools, hidden cameras, drones</li>
+        <li>Probe and open WiFi popups, hunt mode, screen saver</li>
+      </ul>
+      <div class="pins">OLED SDA→D1  SCL→D2<br>No buttons</div>
+      <esp-web-install-button manifest="firmware/manifest_deauth_detector.json">
+        <button slot="activate">Install Full version</button>
+        <span slot="unsupported" class="unsupported">Use Chrome or Edge on a computer to flash.</span>
+        <span slot="not-allowed" class="unsupported">Open this page over HTTPS to flash.</span>
+      </esp-web-install-button>
+      <a class="btn ghost" href="firmware/esp8266_deauth_detector.bin" download>Download .bin</a>
+    </div>
+
+    <div class="card">
+      <span class="tag">SIMPLE</span>
+      <h3>Lite (deauth only)</h3>
+      <ul>
+        <li>Deauth / disassociation detection only</li>
+        <li>Radar with device count and channel activity</li>
+        <li>Alert with attacker, target and router MAC</li>
+        <li>LED blink and screen saver</li>
+      </ul>
+      <div class="pins">OLED SDA→D1  SCL→D2<br>No buttons</div>
+      <esp-web-install-button manifest="firmware/manifest_deauth_detector_lite.json">
+        <button slot="activate">Install Lite version</button>
+        <span slot="unsupported" class="unsupported">Use Chrome or Edge on a computer to flash.</span>
+        <span slot="not-allowed" class="unsupported">Open this page over HTTPS to flash.</span>
+      </esp-web-install-button>
+      <a class="btn ghost" href="firmware/esp8266_deauth_detector_lite.bin" download>Download .bin</a>
+    </div>
+  </div>
+
+  <h2>Pinout</h2>
+  <div class="table-wrap">
+  <table>
+    <tr><th>Part</th><th>Part pin</th><th>NodeMCU / D1 mini pin</th><th>GPIO</th><th>Versions</th></tr>
+    <tr><td>OLED 0.96" SSD1306 (I2C)</td><td>VCC</td><td><code>3V3</code></td><td>-</td><td>All</td></tr>
+    <tr><td></td><td>GND</td><td><code>GND</code></td><td>-</td><td>All</td></tr>
+    <tr><td></td><td>SDA</td><td><code>D1</code></td><td>GPIO5</td><td>All</td></tr>
+    <tr><td></td><td>SCL / SCK</td><td><code>D2</code></td><td>GPIO4</td><td>All</td></tr>
+    <tr><td>Button UP</td><td>one leg → pin, other leg → GND</td><td><code>D5</code></td><td>GPIO14</td><td>Buttons</td></tr>
+    <tr><td>Button OK</td><td>one leg → pin, other leg → GND</td><td><code>D6</code></td><td>GPIO12</td><td>Buttons</td></tr>
+    <tr><td>Button DOWN</td><td>one leg → pin, other leg → GND</td><td><code>D7</code></td><td>GPIO13</td><td>Buttons</td></tr>
+    <tr><td>Status LED</td><td>built-in (no wiring)</td><td><code>D4</code></td><td>GPIO2</td><td>All</td></tr>
+  </table>
+  </div>
+  <p class="by" style="margin-top:10px">Buttons use the ESP8266's internal pull-ups, so no resistors are needed. OLED address 0x3C.</p>
+
+  <h2>Buttons version controls</h2>
+  <div class="table-wrap">
+  <table>
+    <tr><th>Screen</th><th>OK (D6)</th><th>UP / DOWN (D5 / D7)</th></tr>
+    <tr><td>Radar</td><td>Open settings</td><td>Fix channel 1–13 / AUTO hop</td></tr>
+    <tr><td>Settings</td><td>Switch on/off, Save &amp; exit</td><td>Move (hold to scroll)</td></tr>
+    <tr><td>Alerts</td><td>Skip / dismiss</td><td>-</td></tr>
+    <tr><td>Hunt mode</td><td>Stop hunting</td><td>-</td></tr>
+    <tr><td>Screen saver</td><td colspan="2">Any button wakes it</td></tr>
+  </table>
+  </div>
+
+  <h2>Supported boards</h2>
+  <ol>
+    <li>NodeMCU 1.0 (ESP-12E / ESP-12F), 4 MB flash</li>
+    <li>LOLIN / WEMOS D1 mini, 4 MB flash</li>
+  </ol>
+  <p class="by">ESP32 and ESP-01 are not supported by these binaries.</p>
+
+  <footer>
+    For defensive use and learning, on networks you own or are allowed to monitor.
+    Source code: <a href="https://github.com/gamkers/WIFI_BlueTeaming">github.com/gamkers/WIFI_BlueTeaming</a> · MIT License · by Gamkers
+  </footer>
+</main>
+</body>
+</html>
